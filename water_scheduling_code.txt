@@ -1,0 +1,458 @@
+#include <Wire.h>
+#include "RTClib.h"
+#include <LiquidCrystal.h>
+#include <EEPROM.h>
+
+const int Output_Pin = 7;
+const int rs = 12, en = 13, d4 = A0, d5 = A1, d6 = A2, d7 = A3;
+LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
+RTC_DS3231 RTC;
+
+volatile int Pulse_Count;
+unsigned int Liter_per_hour;
+unsigned long Current_Time, Loop_Time;
+
+#define relay_1 5
+#define relay_2 6
+#define SOIL_SENSOR_PIN 2
+#define RAIN_DIGITAL_PIN1 3
+#define RAIN_DIGITAL_PIN2 4
+
+int analogPin = A4;
+int analogValue = 0;
+float flowRate = 0.0;
+
+int tmp, Inc, hor, mIn, add, sEc = 0;
+int buzzer_1 = 11;
+int set = 8;
+int cge = 9;
+int mod = 10;
+int off = 0;
+int ch, cm, cs;
+int Hor = 0, Min = 0, Sec = 0;
+
+byte statusLed = 13;
+byte sensorInterrupt = 0;
+byte sensorPin = 7;  // ✅ changed (A4 was wrong, conflicts with soil sensor)
+
+int count1, count2, count3, count4;
+bool timeSetDone = false;
+
+void setup() {
+  Serial.begin(9600);
+  Wire.begin();
+  RTC.begin();
+  lcd.begin(16, 2);
+
+  Hor = 0;
+  Min = 0;
+  Sec = 0;
+
+  pinMode(set, INPUT_PULLUP);
+  pinMode(cge, INPUT_PULLUP);
+  pinMode(mod, INPUT_PULLUP);
+
+  pinMode(Output_Pin, INPUT);
+  attachInterrupt(digitalPinToInterrupt(Output_Pin), Detect_Rising_Edge, RISING);  // ✅ fixed interrupt
+
+  Current_Time = millis();
+  Loop_Time = Current_Time;
+
+  lcd.setCursor(0, 0);
+  lcd.print("water schedu...");
+  lcd.setCursor(0, 1);
+  lcd.print("to muncip...");
+  delay(2000);
+
+  if (RTC.lostPower()) {
+    Serial.println("RTC not running, setting default time...");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("RTC not running...");
+    delay(2000);
+    //  RTC.adjust(DateTime(2025, 9, 19, 16, 16, 50));
+    // RTC.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  }
+
+  pinMode(RAIN_DIGITAL_PIN1, INPUT);
+  pinMode(RAIN_DIGITAL_PIN2, INPUT);
+  pinMode(buzzer_1, OUTPUT);
+  pinMode(statusLed, OUTPUT);
+
+  pinMode(relay_1, OUTPUT);
+  pinMode(relay_2, OUTPUT);
+  digitalWrite(relay_1, HIGH);
+  digitalWrite(relay_2, HIGH);
+  digitalWrite(buzzer_1, LOW);
+
+  count1 = count2 = count3 = count4 = 0;
+}
+
+void loop() {
+  DateTime now = RTC.now();
+
+  lcd.setCursor(0, 0);
+  lcd.print("Date:");
+  lcd.setCursor(5, 0);
+  lcd.print(now.day());
+  lcd.print('/');
+  lcd.print(now.month());
+  lcd.print('/');
+  lcd.print(now.year());
+
+  lcd.setCursor(0, 1);
+  lcd.print("Time:");
+  lcd.setCursor(5, 1);
+  if (now.hour() < 10) lcd.print("0");
+  lcd.print(now.hour());
+  lcd.print(":");
+  if (now.minute() < 10) lcd.print("0");
+  lcd.print(now.minute());
+  lcd.print(":");
+  if (now.second() < 10) lcd.print("0");
+  lcd.print(now.second());
+
+  delay(500);
+
+  ch = now.hour();
+  cm = now.minute();
+  cs = now.second();
+
+  if (!timeSetDone && digitalRead(mod) == LOW) {
+    settime();
+    timeSetDone = true;
+  }
+
+  if (timeSetDone) {
+    Checktime();
+    sensorLoop();
+  }
+}
+
+void sensorLoop() {
+  int soilStatus = digitalRead(SOIL_SENSOR_PIN);
+  int rainDigital1 = digitalRead(RAIN_DIGITAL_PIN1);
+  int rainDigital2 = digitalRead(RAIN_DIGITAL_PIN2);
+
+  Current_Time = millis();
+  if (Current_Time >= (Loop_Time + 1000)) {
+    Loop_Time = Current_Time;
+    Liter_per_hour = (Pulse_Count * 60 / 7.5);
+    Pulse_Count = 0;
+    Serial.print(Liter_per_hour, DEC);
+    Serial.println(" Liter/hour");
+  }
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Soil:");
+  lcd.print(soilStatus);
+  delay(500);
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Rain1:");
+  lcd.print(rainDigital1);
+  lcd.setCursor(0, 1);
+  lcd.print("Rain2:");
+  lcd.print(rainDigital2);
+  delay(500);
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Flow:");
+  lcd.print(Liter_per_hour);
+  lcd.setCursor(0, 1);
+  lcd.print("L/hour");
+  delay(500);
+
+  if (soilStatus == HIGH) {
+    digitalWrite(relay_1, LOW);
+    digitalWrite(relay_2, LOW);
+    digitalWrite(buzzer_1, HIGH);
+    delay(2000);
+    digitalWrite(relay_1, HIGH);
+    digitalWrite(relay_2, HIGH);
+    digitalWrite(buzzer_1, LOW);
+  }
+
+  if (rainDigital1 == LOW) {
+    digitalWrite(relay_1, LOW);
+    digitalWrite(buzzer_1, HIGH);
+    delay(2000);
+    digitalWrite(relay_1, HIGH);
+    digitalWrite(buzzer_1, LOW);
+  }
+
+  if (rainDigital2 == LOW) {
+    digitalWrite(relay_2, LOW);
+    digitalWrite(buzzer_1, HIGH);
+    delay(2000);
+    digitalWrite(relay_2, HIGH);
+    digitalWrite(buzzer_1, LOW);
+  }
+  String UNO = String("a") + String(soilStatus) + String("b") + String(rainDigital1) + String("c") + String(rainDigital2) + String("d") + String(Liter_per_hour) + String("e");
+  Serial.println(UNO);
+  delay(2000);
+}
+
+void Detect_Rising_Edge() {
+  Pulse_Count++;
+}
+
+void settime() {
+  int i = 0;
+  int tmp = 1;
+
+  Hor = 0;
+  Min = 0;
+
+  // ---------- Load 1 ON ----------
+  while (tmp == 1) {
+    if (digitalRead(cge) == 0) {
+      Hor++;
+      if (Hor == 24) Hor = 0;
+    }
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Load_1-ON Time");
+    lcd.setCursor(0, 1);
+    sethour();
+    if ((digitalRead(set) == 0) && (i == 0)) {
+      hor = Hor;
+      EEPROM.write(1, hor);
+      i++;
+      tmp = 2;
+      while (digitalRead(set) == 0)
+        ;
+    }
+  }
+
+  while (tmp == 2) {
+    if (digitalRead(cge) == 0) {
+      Min++;
+      if (Min == 60) Min = 0;
+    }
+    setminute();
+    if ((digitalRead(set) == 0) && (i == 1)) {
+      mIn = Min;
+      EEPROM.write(2, mIn);
+      i++;
+      lcd.clear();
+      lcd.print("Time Saved");
+      delay(1000);
+      tmp = 3;
+      while (digitalRead(set) == 0)
+        ;
+    }
+  }
+
+  // ---------- Load 1 OFF ----------
+  Hor = 0;
+  Min = 0;
+  while (tmp == 3) {
+    if (digitalRead(cge) == 0) {
+      Hor++;
+      if (Hor == 24) Hor = 0;
+    }
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Load_1-OFF Time");
+    lcd.setCursor(0, 1);
+    sethour();
+    if ((digitalRead(set) == 0) && (i == 2)) {
+      hor = Hor;
+      EEPROM.write(3, hor);
+      i++;
+      tmp = 4;
+      while (digitalRead(set) == 0)
+        ;
+    }
+  }
+
+  while (tmp == 4) {
+    if (digitalRead(cge) == 0) {
+      Min++;
+      if (Min == 60) Min = 0;
+    }
+    setminute();
+    if ((digitalRead(set) == 0) && (i == 3)) {
+      mIn = Min;
+      EEPROM.write(4, mIn);
+      i++;
+      lcd.clear();
+      lcd.print("Time Saved");
+      delay(1000);
+      tmp = 5;
+      while (digitalRead(set) == 0)
+        ;
+    }
+  }
+
+  // ---------- Load 2 ON ----------
+  Hor = 0;
+  Min = 0;
+  while (tmp == 5) {
+    if (digitalRead(cge) == 0) {
+      Hor++;
+      if (Hor == 24) Hor = 0;
+    }
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Load_2-ON Time");
+    lcd.setCursor(0, 1);
+    sethour();
+    if ((digitalRead(set) == 0) && (i == 4)) {
+      hor = Hor;
+      EEPROM.write(5, hor);
+      i++;
+      tmp = 6;
+      while (digitalRead(set) == 0)
+        ;
+    }
+  }
+
+  while (tmp == 6) {
+    if (digitalRead(cge) == 0) {
+      Min++;
+      if (Min == 60) Min = 0;
+    }
+    setminute();
+    if ((digitalRead(set) == 0) && (i == 5)) {
+      mIn = Min;
+      EEPROM.write(6, mIn);
+      i++;
+      lcd.clear();
+      lcd.print("Time Saved");
+      delay(1000);
+      tmp = 7;
+      while (digitalRead(set) == 0)
+        ;
+    }
+  }
+
+  // ---------- Load 2 OFF ----------
+  Hor = 0;
+  Min = 0;
+  while (tmp == 7) {
+    if (digitalRead(cge) == 0) {
+      Hor++;
+      if (Hor == 24) Hor = 0;
+    }
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Load_2-OFF Time");
+    lcd.setCursor(0, 1);
+    sethour();
+    if ((digitalRead(set) == 0) && (i == 6)) {
+      hor = Hor;
+      EEPROM.write(7, hor);
+      i++;
+      tmp = 8;
+      while (digitalRead(set) == 0)
+        ;
+    }
+  }
+
+  while (tmp == 8) {
+    if (digitalRead(cge) == 0) {
+      Min++;
+      if (Min == 60) Min = 0;
+    }
+    setminute();
+    if ((digitalRead(set) == 0) && (i == 7)) {
+      mIn = Min;
+      EEPROM.write(8, mIn);
+      i++;
+      lcd.clear();
+      lcd.print("Time Saved");
+      delay(1000);
+      tmp = 9;
+      while (digitalRead(set) == 0)
+        ;
+    }
+  }
+
+  Serial.println("All times saved!");
+}
+
+void Checktime() {
+  if ((ch == EEPROM.read(1)) && (cm == EEPROM.read(2))) {
+    count1++;
+    if (count1 < 2) {
+      lcd.clear();
+      lcd.setCursor(3, 0);
+      lcd.print("<<Load-1>>");
+      lcd.setCursor(2, 1);
+      lcd.print("<<ON_TIME>>");
+      delay(2000);
+      digitalWrite(buzzer_1, HIGH);
+      digitalWrite(relay_1, LOW);
+    }
+  }
+  if ((ch == EEPROM.read(3)) && (cm == EEPROM.read(4))) {
+    count2++;
+    if (count2 < 2) {
+      lcd.clear();
+      lcd.setCursor(3, 0);
+      lcd.print("<<Load-1>>");
+      lcd.setCursor(2, 1);
+      lcd.print("<<OFF_TIME>>");
+      delay(2000);
+      digitalWrite(buzzer_1, LOW);
+      digitalWrite(relay_1, HIGH);
+    }
+  }
+  if ((ch == EEPROM.read(5)) && (cm == EEPROM.read(6))) {
+    count3++;
+    if (count3 < 2) {
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("<<Load-2>>");
+      lcd.setCursor(0, 1);
+      lcd.print("<<ON_TIME>>");
+      delay(2000);
+      digitalWrite(buzzer_1, HIGH);
+      digitalWrite(relay_2, LOW);
+    }
+  }
+  if ((ch == EEPROM.read(7)) && (cm == EEPROM.read(8))) {
+    count4++;
+    if (count4 < 2) {
+      lcd.clear();
+      lcd.setCursor(3, 0);
+      lcd.print("<<Load-2>>");
+      lcd.setCursor(2, 1);
+      lcd.print("<<OFF_TIME>>");
+      delay(2000);
+      digitalWrite(buzzer_1, LOW);
+      digitalWrite(relay_2, HIGH);
+    }
+  }
+}
+
+void sethour() {
+  lcd.print("|");
+  if (Hor < 10) lcd.print("0");
+  lcd.print(Hor);
+  lcd.print("|:");
+  if (Min < 10) lcd.print("0");
+  lcd.print(Min);
+  lcd.print(":");
+  if (Sec < 10) lcd.print("0");
+  lcd.print(Sec);
+  delay(300);
+}
+
+void setminute() {
+  lcd.setCursor(0, 1);
+  if (Hor < 10) lcd.print("0");
+  lcd.print(Hor);
+  lcd.print(":|");
+  if (Min < 10) lcd.print("0");
+  lcd.print(Min);
+  lcd.print("|:");
+  if (Sec < 10) lcd.print("0");
+  lcd.print(Sec);
+  delay(300);
+}
